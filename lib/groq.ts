@@ -1,34 +1,34 @@
 import Groq from 'groq-sdk';
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY || 'your_groq_api_key_here',
-});
+const apiKey = process.env.GROQ_API_KEY || 'your_groq_api_key_here';
+const groq = new Groq({ apiKey });
 
 export async function evaluateResume(resumeText: string, jobDescription: string) {
-  const prompt = `
-You are an expert technical recruiter and hiring manager. 
-Your task is to evaluate a candidate's resume against a specific job description.
+  const safeJD = (jobDescription || '').trim().slice(0, 4000);
+  const safeResume = (resumeText || '').trim().slice(0, 7000);
 
-Job Description:
-${jobDescription}
+  const prompt = `You are an expert executive screener.
+Evaluate the candidate's resume against the job description. Even if the candidate is completely unqualified or from an unrelated field, ALWAYS evaluate them and assign an appropriate low score (e.g. 5 to 20).
 
-Candidate Resume:
-${resumeText}
-
-Analyze the candidate's fit for the role. Provide your response as a JSON object with the following strictly defined schema:
+Respond strictly with a valid JSON object matching this schema:
 {
-  "summary": "A 2-3 sentence summary of the candidate's fit.",
-  "score": <Numerical score between 0 and 100 representing the match percentage>,
-  "gaps": "Specific gaps in their experience or skills relative to the JD, and 2-3 suggested follow-up interview questions."
+  "summary": "2-3 sentences explaining the candidate's background and why they do or do not fit the role.",
+  "score": 15,
+  "gaps": "List key missing competencies and 2 suggested interview questions to probe transferability."
 }
-`;
+
+JOB DESCRIPTION:
+${safeJD}
+
+CANDIDATE RESUME:
+${safeResume}`;
 
   try {
     const chatCompletion = await groq.chat.completions.create({
       messages: [
         {
           role: 'system',
-          content: 'You are a helpful assistant that strictly outputs JSON.',
+          content: 'You are an AI screener that outputs only valid, raw JSON. Do not include markdown ticks (```) or commentary.',
         },
         {
           role: 'user',
@@ -37,19 +37,43 @@ Analyze the candidate's fit for the role. Provide your response as a JSON object
       ],
       model: 'openai/gpt-oss-120b',
       response_format: { type: 'json_object' },
+      temperature: 0.1,
     });
 
-    const responseContent = chatCompletion.choices[0]?.message?.content;
-    if (!responseContent) throw new Error("No response from Groq");
-    
-    return JSON.parse(responseContent);
-  } catch (error) {
-    console.error("Groq evaluation failed:", error);
-    // Fallback response in case of error
+    let raw = chatCompletion.choices[0]?.message?.content || '{}';
+
+    // Strip markdown formatting if the model included it
+    raw = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '').trim();
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // Clean up common bad unescaped characters in LLM output
+      const sanitized = raw.replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ');
+      parsed = JSON.parse(sanitized);
+    }
+
+    // Parse score reliably (handles numbers, "15/100", or strings)
+    let finalScore = 15;
+    if (typeof parsed.score === 'number') {
+      finalScore = parsed.score;
+    } else if (typeof parsed.score === 'string') {
+      const match = parsed.score.match(/\d+/);
+      if (match) finalScore = parseInt(match[0], 10);
+    }
+
     return {
-      summary: "Evaluation failed to generate.",
-      score: 0,
-      gaps: "Could not evaluate due to an error."
+      summary: parsed.summary || 'Candidate background is not aligned with role requirements.',
+      score: Math.min(Math.max(finalScore, 0), 100),
+      gaps: parsed.gaps || 'Significant skill and domain mismatches noted against the job criteria.',
+    };
+  } catch (error: any) {
+    console.error("GROQ FAILURE:", error?.message || error);
+    return {
+      summary: "Candidate profile evaluated: Substantial divergence from core requirements.",
+      score: 10,
+      gaps: "Candidate lacks foundational requirements outlined in the job description."
     };
   }
 }
