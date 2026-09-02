@@ -55,8 +55,13 @@ export async function POST(request: Request) {
 
     console.log(`[APPLY ROUTE] Matched Job: "${job.title}". JD length: ${job.description?.length || 0} chars.`);
 
-    // 3. Evaluate using Groq LLM
-    let evaluation = { summary: null, score: null, gaps: null };
+// 3. Evaluate using Groq LLM
+    let evaluation: {
+      summary: string | null;
+      score: number | null;
+      gaps: string | null;
+    } = { summary: null, score: null, gaps: null };
+
     try {
       console.log('[APPLY ROUTE] Sending payload to Groq...');
       evaluation = await evaluateResume(resumeText, job.description);
