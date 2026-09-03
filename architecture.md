@@ -1,111 +1,98 @@
-# Resume Screener AI — System Architecture
+# BestFit.ai — Resume Screener
 
-This document details the architectural design, data schemas, ingestion pipelines, and security model of the Clara AI Recruitment Screener.
-
----
-
-## 1. High-Level Flowchart
-
-[Candidate View (/)]
-|
-| 1. Submit Profile + .docx Resume
-v
-[POST /api/apply] (Serverless Route Handler)
-|
-+---> 2. Parse .docx Buffer via Mammoth
-|
-+---> 3. Fetch Targeted JD from Supabase ('jobs' table)
-|
-+---> 4. Sanitize inputs & slice context length
-|
-+---> 5. Evaluate Fit via Groq SDK (openai/gpt-oss-120b)
-|        `--> Returns strict JSON: { score, summary, gaps }
-|
-+---> 6. Persist Record to Supabase ('applications' table)
-|
-v
-[Response: { success: true }] ---> (Score & AI Summary Kept Private from Candidate)
-
-[Recruiter / Admin View (/admin)]
-|
-| 1. Enter Passcode Challenge (admin@123)
-| 2. Fetch Active Jobs (GET /api/jobs)
-v
-[GET /api/admin/jobs/[id]/applications]
-|
-+---> Queries Supabase ('applications' table)
-|     `--> Filtered by job_id, ordered by llm_score DESC
-v
-[Admin Dashboard UI]
-* Visual Metric Cards (Shortlist 80+, Review 50-79, Mismatch <50)
-* Search Filtering & Quick Contact Actions
-* AI Fit Summaries & Identified Skill Gaps / Interview Probes
-
+AI-powered recruitment screening system that evaluates candidate resumes against recruiter-defined job requirements and produces recruiter-only fit scores, summaries, and skill gaps.
 
 ---
 
-## 2. Database Schema (Supabase / PostgreSQL)
+## 1. High-Level Architecture Flow
+[ Candidate Portal (/) ]│  (POST /api/apply)▼[ Next.js Serverless Route ] ──► [ Mammoth .docx Parser ] ──► (Plain Text Extraction)│├──► Fetch JD from Supabase ('jobs' table)├──► Apply Context Guardrails (JD ≤ 4k chars, Resume ≤ 7k chars)│▼[ Groq LPU Inference Cloud ] (openai/gpt-oss-120b)│  (Enforced JSON Mode Evaluation)▼[ Persist to Supabase ] ──► 'applications' table (llm_score, llm_summary, llm_gaps)│├──► Candidate Response: { "success": true }  <-- Internal metrics stripped│▼[ Recruiter Console (/admin) ] ──► Authenticated via 2h Inactivity Lease│  (GET /api/admin/jobs/:id/applications)▼[ Ranked Applicant Stack ] ──► Filter by Tier (80+ / 50–79 / <50)
+---
 
-The backend relies on two primary relational tables linked via foreign key constraints:
+## 2. Ingestion & Evaluation Pipelines
+
+### Candidate Flow
+1. **Selection & Ingestion:** Candidate selects an active role on `/`, fills contact parameters, and uploads a `.docx` resume.
+2. **Buffer Processing:** `POST /api/apply` accepts the multipart payload and invokes `mammoth.extractRawText` to convert the binary buffer into clean plain text.
+3. **Database Look-up:** Server fetches the relational Job Description from Supabase.
+4. **Context Windowing:** Text lengths are sanitized and clamped:
+   * **Job Description:** $\le$ 4,000 characters
+   * **Resume Text:** $\le$ 7,000 characters
+5. **LLM Evaluation:** Payload is dispatched to Groq (`openai/gpt-oss-120b`) enforcing JSON mode.
+6. **Persistence:** Evaluation payload (`score`, `summary`, `gaps`) is written into the `applications` table.
+7. **Zero-Leakage Response:** The client receives only `{ success: true }`. AI evaluation data never crosses the candidate boundary.
+
+### Recruiter Flow
+1. **Gated Access:** Recruiter navigates to `/admin` and completes the credential challenge (`admin@123`).
+2. **Session Lease:** Authentication state is retained with a **2-hour sliding inactivity window** that automatically invalidates on idle timeout.
+3. **Live Query:** `GET /api/admin/jobs/:id/applications` pulls candidates ordered descending by `llm_score`.
+4. **Insight Inspection:** UI surfaces candidates grouped into performance tiers alongside AI-generated gap analyses and targeted interview probes.
+
+---
+
+## 3. Database Schema (Supabase / PostgreSQL)
 
 ### `jobs` Table
-Stores recruiter-created job descriptions and criteria.
+Stores recruiter-defined requisitions, company metadata, and scoring criteria.
 
-| Column | Type | Description |
-| :--- | :--- | :--- |
-| `id` | `UUID` (PK, default `gen_random_uuid()`) | Unique job identifier |
-| `title` | `TEXT` | Role title (e.g., *Founders Office Associate*) |
-| `company` | `TEXT` | Hiring organization |
-| `description` | `TEXT` | Complete job description, qualifications, and criteria |
-| `created_at` | `TIMESTAMPTZ` (default `now()`) | Timestamp of creation |
+| Column | Type | Constraints | Description |
+| :--- | :--- | :--- | :--- |
+| `id` | `UUID` | Primary Key, `gen_random_uuid()` | Unique job identifier |
+| `title` | `TEXT` | `NOT NULL` | Role designation |
+| `company` | `TEXT` | `NOT NULL` | Hiring enterprise or client entity |
+| `description` | `TEXT` | `NOT NULL` | JD and target evaluation criteria |
+| `created_at` | `TIMESTAMPTZ` | `DEFAULT now()` | Job creation timestamp |
 
 ### `applications` Table
-Stores candidate information, raw extracted resume text, and private evaluation insights.
+Stores candidate submissions, raw extracted text, and private LLM evaluation metrics.
 
-| Column | Type | Description |
-| :--- | :--- | :--- |
-| `id` | `UUID` (PK, default `gen_random_uuid()`) | Unique application identifier |
-| `job_id` | `UUID` (FK -> `jobs.id`, ON DELETE CASCADE) | Referenced job role |
-| `full_name` | `TEXT` | Candidate's legal name |
-| `email` | `TEXT` | Contact email address |
-| `phone` | `TEXT` | Contact phone number |
-| `age` | `INTEGER` | Candidate age |
-| `current_location` | `TEXT` | City, Country |
-| `resume_text` | `TEXT` | Normalized plain text extracted from uploaded `.docx` |
-| `llm_score` | `INTEGER` | Role match percentage evaluated by AI (0–100) |
-| `llm_summary` | `TEXT` | 2–3 sentence candidate background & fit summary |
-| `llm_gaps` | `TEXT` | Missing competencies & targeted interview questions |
-| `created_at` | `TIMESTAMPTZ` (default `now()`) | Submission timestamp |
-
----
-
-## 3. Component Breakdown
-
-### A. Document Extraction (`/lib/parseDocx.ts`)
-* Ingests binary buffers from multipart form submissions.
-* Uses `mammoth.extractRawText` to convert Word documents (`.docx`) into normalized plaintext strings while stripping markup and stylistic baggage.
-* Throws explicit validation errors if a file is unreadable, corrupted, or empty.
-
-### B. LLM Screener Service (`/lib/groq.ts`)
-* **Model:** `openai/gpt-oss-120b` running on Groq LPU inference engines.
-* **Context Protection:** Slices incoming job descriptions to 4,000 characters and resume text to 7,000 characters to prevent payload overflows and token context breaches.
-* **Structured Output Enforcement:** Uses `response_format: { type: "json_object" }` paired with a strict system prompt to guarantee structured JSON output (`score`, `summary`, `gaps`).
-* **Sanitization Layer:** Cleans control characters and strips markdown code fences (````json ... ````) before executing `JSON.parse` to avoid parsing crashes on fringe or mismatched resumes.
-
-### C. Public Candidate Ingestion (`/app/page.tsx` & `/app/api/apply/route.ts`)
-* Exposes active roles fetched via `/api/jobs`.
-* Accepts candidate forms and documents via `POST /api/apply`.
-* **Privacy Isolation:** The route handler extracts text, completes the LLM evaluation, and writes to Supabase entirely server-side. The client response returns only `{ success: true }`, ensuring internal scores and recruiter notes are never exposed across the network to candidates.
-
-### D. Recruiter Command Center (`/app/admin/page.tsx`)
-* Gated by an administrative authentication barrier (`admin@123`).
-* Summarizes application pools with dynamic metric cards: Total Evaluated, Strong Fit ($\ge 80$), Review ($50\text{--}79$), and Low-Fit ($< 50$).
-* Renders ranked applicant cards sorted descending by `llm_score` with collapsible executive AI briefs, detected gaps, and generated interview follow-up questions.
+| Column | Type | Constraints | Description |
+| :--- | :--- | :--- | :--- |
+| `id` | `UUID` | Primary Key, `gen_random_uuid()` | Unique application ID |
+| `job_id` | `UUID` | Foreign Key (`jobs.id` ON DELETE CASCADE) | Referenced position |
+| `full_name` | `TEXT` | `NOT NULL` | Candidate legal name |
+| `email` | `TEXT` | `NOT NULL` | Contact email |
+| `phone` | `TEXT` | `NOT NULL` | Contact telephone |
+| `age` | `INTEGER` | `NOT NULL` | Candidate age |
+| `address` | `TEXT` | `NULLABLE` | Street address |
+| `current_location`| `TEXT` | `NOT NULL` | City and country |
+| `resume_text` | `TEXT` | `NOT NULL` | Extracted UTF-8 resume string |
+| `llm_score` | `INTEGER` | `CHECK (llm_score BETWEEN 0 AND 100)` | Fit score (0–100) |
+| `llm_summary` | `TEXT` | `NULLABLE` | Recruiter-only candidate summary |
+| `llm_gaps` | `TEXT` | `NULLABLE` | Recruiter-only competency gaps |
+| `created_at` | `TIMESTAMPTZ` | `DEFAULT now()` | Submission timestamp |
 
 ---
 
-## 4. Robustness & Error Mitigation
+## 4. Core Design Decisions
 
-* **Empty / Non-DOCX Uploads:** Validated at both frontend form boundaries and API middleware checks (returns HTTP 400).
-* **Severely Mismatched Profiles:** Evaluated with explicit scoring instructions; low-fit candidates (e.g., chefs applying for investment or strategy roles) receive baseline scores ($0\text{--}20$) alongside an itemized list of missing foundational prerequisites instead of throwing uncaught exceptions.
-* **Database Isolation:** Supabase operations use parameterized queries and foreign key constraints to maintain relational integrity between positions and submissions.
+### Document Parsing via Mammoth
+* Handled server-side in `/lib/parseDocx.ts`.
+* Removes XML boilerplate, visual styling, and formatting overhead.
+* Eliminates OS-level dependencies (e.g., LibreOffice, unoconv).
+* Rejects empty or corrupt extracts ($< 20$ characters) with an immediate **HTTP 400**.
+
+### LLM Evaluation Engine
+* **Inference Platform:** Groq Cloud LPU
+* **Model:** `openai/gpt-oss-120b`
+* **Output Format:** Enforced JSON object
+* **Standard Output Contract:**
+```json
+{
+  "score": 85,
+  "summary": "Strong candidate-role alignment with robust technical experience.",
+  "gaps": "Limited direct exposure to enterprise client management."
+}
+Context GuardrailsInput VariableCharacter BoundEngineering RationaleJob Description4,000 charsBounds context window, reduces latency, standardizes requisitionsResume Text7,000 charsPrevents token runaway, controls cost, mitigates prompt-injection attacksOutput Sanitization LayerLLM Output Stream 
+      ▼
+Regex Stripping (Remove ```json markdown fences)
+      ▼
+Remove unescaped control characters
+      ▼
+JSON.parse() validation
+      ▼
+Numeric Range Verification (score clamped between 0 and 100)
+      ▼
+Supabase Persistence
+5. Security & Boundary EnforcementCandidate Privacy Shield: Candidates receive only { success: true }. The response payload never exposes llm_score, llm_summary, llm_gaps, or internal ranking criteria.Server-to-Server Authentication: Groq SDK and Supabase service-role keys are strictly maintained in server environments (process.env) and are never bundled into client-side code.Sliding Admin Lease: The recruiter console monitors client-side activity events (keydown, click, mousemove, scroll). A 2-hour inactivity timeout clears local authentication state.Explicit Session Revocation: Dedicated AdminNavbar component exposes a manual sign-out action to clear credentials on demand.6. Scoring & Fault Tolerance MatrixEvaluated Score TiersScore RangeTier ClassificationRouting Action80 – 100Strong FitFast-track shortlist candidate50 – 79ReviewSecondary manual recruiter assessment0 – 49Low / MismatchAuto-filtered with identified missing prerequisitesFault Tolerance HandlingFailure ScenarioMitigation StrategyEmpty or Corrupted .docxFast-fail at parser boundary with HTTP 400 Bad RequestResume Exceeds LimitServer slices text to first 7,000 characters before LLM callJD Exceeds LimitServer slices text to first 4,000 characters before LLM callMalformed LLM OutputPre-parsing cleanup strips code blocks; fallback values appliedScore Outside RangeClamped to nearest integer between 0 and 100Irrelevant CandidateEvaluated objectively with low score ($0\text{--}20$) and itemized gaps7. Technology StackFrontend: Next.js (App Router, React 19, Tailwind CSS)API Layer: Next.js Serverless Route HandlersDocument Parsing: Mammoth.js (.docx binary to plain text)Database: Supabase (PostgreSQL with Foreign Key Casings)AI Provider: Groq Cloud LPUModel: openai/gpt-oss-120b (JSON Mode)Deployment: Vercel
+
+Core Operating Principle: Candidates submit. The server evaluates. PostgreSQL persists. Recruiters review. AI evaluation never crosses the candidate boundary.
