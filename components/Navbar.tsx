@@ -1,25 +1,24 @@
 import Link from 'next/link';
+import { Sparkles } from 'lucide-react';
 
 export default function Navbar() {
   return (
-    <nav className="bg-white shadow-sm border-b">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between h-16">
-          <div className="flex items-center">
-            <Link href="/" className="flex-shrink-0 flex items-center">
-              <span className="text-xl font-bold text-slate-800">Resume Screener</span>
-            </Link>
+    <header className="sticky top-0 z-40 border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-md">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+        <Link href="/" className="flex items-center gap-2.5 group">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-500 to-violet-500 flex items-center justify-center text-white shadow-md shadow-indigo-500/20 group-hover:scale-105 transition-transform">
+            <Sparkles className="w-4 h-4" />
           </div>
-          <div className="flex items-center space-x-4">
-            <Link href="/" className="text-slate-600 hover:text-slate-900 px-3 py-2 rounded-md text-sm font-medium">
-              Candidate Portal
-            </Link>
-            <Link href="/admin" className="text-slate-600 hover:text-slate-900 px-3 py-2 rounded-md text-sm font-medium">
-              Admin Dashboard
-            </Link>
+          <div>
+            <span className="font-bold text-base tracking-tight text-white group-hover:text-indigo-300 transition-colors">
+              BestFit<span className="text-indigo-400">.ai</span>
+            </span>
+            <span className="hidden sm:inline-block ml-2 text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 text-indigo-300">
+              Careers Portal
+            </span>
           </div>
-        </div>
+        </Link>
       </div>
-    </nav>
+    </header>
   );
 }
