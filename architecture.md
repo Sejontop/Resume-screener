@@ -5,7 +5,7 @@ AI-powered recruitment screening system that evaluates candidate resumes against
 ---
 
 ## 1. High-Level Architecture Flow
-![BestFit.ai System Architecture](/architecture.png)
+![System Architecture](./public/architecture.png)
 ---
 
 ## 2. Ingestion & Evaluation Pipelines
