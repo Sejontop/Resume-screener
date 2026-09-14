@@ -5,7 +5,7 @@ AI-powered recruitment screening system that evaluates candidate resumes against
 ---
 
 ## 1. High-Level Architecture Flow
-[ Candidate Portal (/) ]│  (POST /api/apply)▼[ Next.js Serverless Route ] ──► [ Mammoth .docx Parser ] ──► (Plain Text Extraction)│├──► Fetch JD from Supabase ('jobs' table)├──► Apply Context Guardrails (JD ≤ 4k chars, Resume ≤ 7k chars)│▼[ Groq LPU Inference Cloud ] (openai/gpt-oss-120b)│  (Enforced JSON Mode Evaluation)▼[ Persist to Supabase ] ──► 'applications' table (llm_score, llm_summary, llm_gaps)│├──► Candidate Response: { "success": true }  <-- Internal metrics stripped│▼[ Recruiter Console (/admin) ] ──► Authenticated via 2h Inactivity Lease│  (GET /api/admin/jobs/:id/applications)▼[ Ranked Applicant Stack ] ──► Filter by Tier (80+ / 50–79 / <50)
+![BestFit.ai System Architecture](/architecture.png)
 ---
 
 ## 2. Ingestion & Evaluation Pipelines
